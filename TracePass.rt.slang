@@ -1,15 +1,21 @@
-#include "Scene/SceneDefines.slangh"
+#include "Scene/ScenePrimitiveDefines.slangh"
+#include "Scene/Material/MaterialDefines.slangh"
 
-import Scene.shading;
 import Scene.Raytracing;
 import Scene.Intersection;
 import Scene.RaytracingInline;
+import Scene.Shading;
 import Utils.Math.MathHelpers;
 import Utils.Geometry.GeometryHelpers;
+import Utils.Sampling.SampleGenerator;
 import Rendering.Lights.LightHelpers;
 import Rendering.Lights.EnvMapSampler;
 import Rendering.Lights.EmissiveLightSampler;
 import Rendering.Lights.EmissiveLightSamplerHelpers;
+import Rendering.Materials.MaterialShading;
+import Params;
+import StaticParameters;
+import LoadShadingData;
 import PathTracer;
 
 RWTexture2D<float4> gVPosW;
@@ -40,9 +46,8 @@ struct SampleInitializer
 
         if(hit.isValid())
         {
-            let lod = ExplicitLodTextureSampler(0.f);
+            const float lod = 0.f;
             ShadingData sd = LoadShadingData(hit,primaryRayDir,lod,true);
-            let bsdf = gScene.materials.getBSDF(sd,lod);
 
             float weight = 1.f / kSamplePerPixel;
 
@@ -84,8 +89,8 @@ struct SampleInitializer
                 }
                 else
                 {
-                    float invPdf = sample.random > 0.f ? 1.f / sample.random : 0.f; 
-                    sample.vColor = bsdf.eval(sd,wo,sg) * sample.sColor * invPdf;
+                    float invPdf = evalPdfBSDF(sd, wo) > 0.f ? 1.f / evalPdfBSDF(sd, wo) : 0.f;
+                    sample.vColor = evalBSDFCosine(sd, wo) * sample.sColor * invPdf;
                 }
             }
 
@@ -93,7 +98,9 @@ struct SampleInitializer
         }
         else
         {
-            float3 color = pathtracer.GetBackGroundColor(primaryRayDir);
+            float3 color = 0.f;
+            //if(!kUsedReSTIRDI)
+                color = pathtracer.GetBackGroundColor(primaryRayDir);
             outputColor[pixel] = color;
             sample.vColor = color;
         }
@@ -116,7 +123,8 @@ void ScatterTriangleAnyHit(inout PathPayLoad pathState, BuiltInTriangleIntersect
     GeometryInstanceID instanceID = getGeometryInstanceID();
     VertexData v = getVertexData(instanceID, PrimitiveIndex(), attribs);
     const uint materialID = gScene.getMaterialID(instanceID);
-    if (gScene.materials.alphaTest(v, materialID, 0.f)) IgnoreHit();
+    if (alphaTest(v, gScene.materials[materialID], gScene.materialResources[materialID], 0.f))
+        IgnoreHit();
 }
 
 [shader("closesthit")]

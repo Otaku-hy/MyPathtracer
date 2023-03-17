@@ -1,48 +1,23 @@
-#include "Scene/SceneDefines.slangh"
+#include "Scene/ScenePrimitiveDefines.slangh"
+#include "Scene/Material/MaterialDefines.slangh"
 
-__exported import Scene.shading;
-__exported import Scene.Raytracing;
-__exported import Scene.Intersection;
-__exported import Scene.RaytracingInline;
-__exported import Scene.Material.ShadingUtils;
-__exported import Utils.Math.MathHelpers;
-__exported import Utils.Geometry.GeometryHelpers;
-__exported import Utils.Sampling.SampleGenerator;
-__exported import Rendering.Lights.LightHelpers;
-__exported import Rendering.Lights.EnvMapSampler;
-__exported import Rendering.Lights.EmissiveLightSampler;
-__exported import Rendering.Lights.EmissiveLightSamplerHelpers;
-__exported import Params;
-__exported import StaticParameters;
+import Scene.shading;
+import Scene.Raytracing;
+import Scene.Intersection;
+import Scene.RaytracingInline;
+import Utils.Math.MathHelpers;
+import Utils.Geometry.GeometryHelpers;
+import Utils.Sampling.SampleGenerator;
+import Rendering.Lights.LightHelpers;
+import Rendering.Lights.EnvMapSampler;
+import Rendering.Lights.EmissiveLightSampler;
+import Rendering.Lights.EmissiveLightSamplerHelpers;
+import Rendering.Materials.MaterialShading;
+import Params;
+import StaticParameters;
+import LoadShadingData;
 
 static const float kRayTMax = 1e20f;
-
-ShadingData LoadShadingData(HitInfo hit,float3 rayDir,ITextureSampler lod,bool isPrimaryHit)
-{
-    VertexData vd = {};
-    uint materialID;
-        
-    if (hit.getType() == HitType::Triangle)
-    {
-        const TriangleHit triangleHit = hit.getTriangleHit();
-        vd = gScene.getVertexData(triangleHit);
-        materialID = gScene.getMaterialID(triangleHit.instanceID);
-    }
-
-    if (hit.getType() == HitType::DisplacedTriangle)
-    {
-        const DisplacedTriangleHit displacedTriangleHit = hit.getDisplacedTriangleHit();
-        vd = gScene.getVertexData(displacedTriangleHit, -rayDir);
-        materialID = gScene.getMaterialID(displacedTriangleHit.instanceID);
-    }   
-
-    ShadingData sd = gScene.materials.prepareShadingData(vd,materialID,-rayDir,lod);
-
-    if(isPrimaryHit)
-        adjustShadingNormal(sd, vd);
-
-    return sd;
-}
 
 struct PathSample
 {
@@ -150,6 +125,13 @@ struct PathTracer
             return computeRayOrigin(pos,dot(faceNormal,rayDir) >=0 ? faceNormal : -faceNormal);
         }
     };
+
+    bool TraceVisibilityRay(const Ray ray)
+    {
+        SceneRayQuery<1> sceneRayQuery;
+    return sceneRayQuery.traceVisibilityRay(ray.toRayDesc(), RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xff);
+
+    }
 
     float3 GetBackGroundColor(float3 dir)
     {
@@ -294,17 +276,19 @@ struct PathTracer
         return true;
     }
 
-    bool GenerateScatterRay(ShadingData sd,IBSDF bsdf,ITextureSampler lod,float3 rayOrigin,inout PathPayLoad pathState)
+    bool GenerateScatterRay(ShadingData sd,const float lod,float3 rayOrigin,inout PathPayLoad pathState)
     {
-        BSDFSample bsdfSample;
-        if(bsdf.sample(sd,pathState.sg,bsdfSample))
+        BSDFSample_ bsdfSample;
+
+        if (sampleBSDF(sd,pathState.sg,bsdfSample))
         {
             pathState.thp *= bsdfSample.weight;
-            pathState.direction = bsdfSample.wo;
+            pathState.direction = bsdfSample.wi;
             pathState.origin = rayOrigin;
             pathState.pdf = bsdfSample.pdf;
             return any(pathState.thp > 0.f);
         }
+
         return false;
     }
 
@@ -315,19 +299,16 @@ struct PathTracer
         const bool isTriangleHit = hitType == HitType::Triangle;
         const bool isPrimaryHit = (pathState.currentVertexIndex == 1);
 
-        let lod = ExplicitLodTextureSampler(0.f);
+        const float lod = 0.f;
         ShadingData sd = LoadShadingData(hit,pathState.direction,lod,isPrimaryHit);
-        let bsdf = gScene.materials.getBSDF(sd, lod);
-
+        
         pathState.norm = sd.N;
         pathState.posW = sd.posW;
-
-        BSDFProperties bsdfProperties = bsdf.getProperties(sd);
 
         bool computeEmissive = isPrimaryHit || (!kUsedNEE || kUsedMis || !pathState.isLastVertexSampledLight);
         if(kUsedReSTIRDI && pathState.currentVertexIndex == 2) computeEmissive = false;
 
-        if(computeEmissive && any(bsdfProperties.emission > 0.f))
+        if(computeEmissive && any(sd.emissive > 0.f))
         {
             float misWeight = 1.f;
             if(!isPrimaryHit && isTriangleHit && kUsedMis && pathState.isLastVertexSampledLight)
@@ -341,7 +322,7 @@ struct PathTracer
                 float lightPdf = GetEmissiveLightProbabilities() * emissiveSampler.evalPdf(pathState.origin, pathState.norm, true, tlhit);
                 misWeight = EvalMisWeight(1,pathState.pdf,1,lightPdf);    
             }
-            AddToPathContribution(pathState,bsdfProperties.emission * misWeight);
+            AddToPathContribution(pathState,sd.emissive * misWeight);
         }
 
         /// terminate path with mis
@@ -351,7 +332,7 @@ struct PathTracer
             return;
         }
 
-        uint lobes = bsdf.getLobes(sd);
+        uint lobes = getBSDFLobes(sd);
         bool hasNonDeltaLobes = (lobes & (uint)LobeType::NonDelta) != 0;
 
         bool applyNEE = kUsedNEE && hasNonDeltaLobes;
@@ -372,16 +353,15 @@ struct PathTracer
             {
                 if(kUsedMis && ls.lightType != uint(LightType::Analytic))
                 {
-                    float scatterPdf = bsdf.evalPdf(sd,ls.dir);
+                    float scatterPdf = evalPdfBSDF(sd,ls.dir);
                     ls.Li *= EvalMisWeight(1,ls.pdf,1,scatterPdf);
                 }
-                float3 weight = bsdf.eval(sd,ls.dir,pathState.sg);
+                float3 weight = evalBSDFCosine(sd,ls.dir);
                 float3 Lr = ls.Li * weight;
                 if(any(Lr > 0.f))
                 {
                     Ray ray = ls.GetVisibilityRay();
-                    SceneRayQuery<1> scene_ray_query;
-                    bool visible = scene_ray_query.traceVisibilityRay(ray, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xff);
+                    bool visible = TraceVisibilityRay(ray);
                     if(visible) AddToPathContribution(pathState,Lr);
                 }
             }
@@ -389,7 +369,7 @@ struct PathTracer
 
         float3 rayOrigin = sd.computeNewRayOrigin();
 
-        bool valid = GenerateScatterRay(sd,bsdf,lod,rayOrigin,pathState);
+        bool valid = GenerateScatterRay(sd,lod,rayOrigin,pathState);
 
         if(HasFinishedScatter(pathState) && kUsedNEE && !kUsedMis && pathState.isLastVertexSampledLight) valid = false;
 

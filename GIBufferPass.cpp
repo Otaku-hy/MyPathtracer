@@ -26,11 +26,12 @@
  # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  **************************************************************************/
 #include "GIBufferPass.h"
-
-const RenderPass::Info GIBufferPass::kInfo{ "GIBufferPass", "Insert pass description here." };
+#include "RenderGraph/RenderPassHelpers.h"
 
 namespace
 {
+    const char kDesc[] = "gi pass";
+
     const std::string kShaderModel = "6_5";
     const std::string kTracePassPath = "RenderPasses/GIBufferPass/TracePass.rt.slang";
 
@@ -38,7 +39,7 @@ namespace
 
     ChannelList InputChannel
     {
-        {kInputVBuffer,"vbuffer","input vbuffer to get visible point",false},
+        {kInputVBuffer,"vbuffer","input vbuffer to get visible point",false,ResourceFormat::Unknown},
     };
 
     const std::string kOutputColor = "outputColor";
@@ -64,18 +65,22 @@ namespace
 
     uint32_t kMaxPayloadSizeBytes = 128u;
 }
-// Don't remove this. it's required for hot-reload to function properly
-extern "C" FALCOR_API_EXPORT const char* getProjDir()
+
+extern "C" __declspec(dllexport) const char* getProjDir()
 {
     return PROJECT_DIR;
 }
 
-extern "C" FALCOR_API_EXPORT void getPasses(Falcor::RenderPassLibrary & lib)
+extern "C" __declspec(dllexport) void getPasses(Falcor::RenderPassLibrary & lib)
 {
-    lib.registerPass(GIBufferPass::kInfo, GIBufferPass::create);
+    lib.registerClass("GIBufferPass", kDesc, GIBufferPass::create);
 }
 
-GIBufferPass::GIBufferPass() : RenderPass(kInfo)
+std::string GIBufferPass::getDesc() {
+    return kDesc;
+}
+
+GIBufferPass::GIBufferPass() : RenderPass()
 {
     mpSampleGenerator = SampleGenerator::create(SAMPLE_GENERATOR_UNIFORM);
 }
@@ -150,11 +155,16 @@ void GIBufferPass::execute(RenderContext* pRenderContext, const RenderData& rend
 void GIBufferPass::BeginFrame(RenderContext* pRenderContext, const RenderData& renderData)
 {
     const auto& pOutputColor = renderData[kOutputColor]->asTexture();
-    FALCOR_ASSERT(pOutputColor);
+    assert(pOutputColor);
 
     if (!mpScene)
     {
-        clearRenderPassChannels(pRenderContext, OutputChannel, renderData);
+        auto clear = [&](const ChannelDesc& channel)
+        {
+            auto pTex = renderData[channel.name]->asTexture();
+            if (pTex) pRenderContext->clearUAV(pTex->getUAV().get(), float4(0.f));
+        };
+        for (const auto& channel : OutputChannel) clear(channel);
         return;
     }
 
@@ -223,7 +233,7 @@ void GIBufferPass::setScene(RenderContext* pRenderContext, const Scene::SharedPt
     RtProgram::Desc desc;
     desc.addShaderLibrary(kTracePassPath);
     desc.setShaderModel(kShaderModel);
-    desc.addTypeConformances(mpScene->getTypeConformances());
+    //desc.addTypeConformances(mpScene->getTypeConformances());
     desc.setMaxAttributeSize(mpScene->getRaytracingMaxAttributeSize());
     desc.setMaxPayloadSize(kMaxPayloadSizeBytes);
     desc.setMaxTraceRecursionDepth(1);
@@ -234,17 +244,18 @@ void GIBufferPass::setScene(RenderContext* pRenderContext, const Scene::SharedPt
 
     if (mpScene->hasGeometryType(Scene::GeometryType::TriangleMesh))
     {
-        mTracePass.mBindTable->setHitGroup(0, mpScene->getGeometryIDs(Scene::GeometryType::TriangleMesh), desc.addHitGroup("ScatterTriangleClosestHit", "ScatterTriangleAnyHit"));
+        mTracePass.mBindTable->setHitGroupByType(0, mpScene, Scene::GeometryType::TriangleMesh, desc.addHitGroup("ScatterTriangleClosestHit", "ScatterTriangleAnyHit"));
     }
 
     if (mpScene->hasGeometryType(Scene::GeometryType::DisplacedTriangleMesh))
     {
-        mTracePass.mBindTable->setHitGroup(0, mpScene->getGeometryIDs(Scene::GeometryType::DisplacedTriangleMesh), desc.addHitGroup("ScatterDisplacedTriangleMeshClosestHit", "", "DisplacedTriangleMeshIntersection"));
+        mTracePass.mBindTable->setHitGroupByType(0, mpScene,Scene::GeometryType::DisplacedTriangleMesh, desc.addHitGroup("ScatterDisplacedTriangleMeshClosestHit", "", "DisplacedTriangleMeshIntersection"));
     }
 
     auto defines = GetDefines();
 
-    mTracePass.mProgram = RtProgram::create(desc, defines);
+    desc = desc.addDefines(defines);
+    mTracePass.mProgram = RtProgram::create(desc);
     mTracePass.mVars = RtProgramVars::create(mTracePass.mProgram, mTracePass.mBindTable);
 }
 
@@ -255,7 +266,8 @@ void GIBufferPass::PrepareProgram(RenderContext* pRenderComntext, const RenderDa
     auto defines = GetDefines();
 
     RtProgram::Desc desc = mTracePass.mProgram->getRtDesc();
-    mTracePass.mProgram = RtProgram::create(desc, defines);
+    desc = desc.addDefines(defines);
+    mTracePass.mProgram = RtProgram::create(desc);
 
     mTracePass.mVars = RtProgramVars::create(mTracePass.mProgram, mTracePass.mBindTable);
 
