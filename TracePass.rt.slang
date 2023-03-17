@@ -83,14 +83,15 @@ struct SampleInitializer
 
                 float3 wo = normalize(sample.sPos - sample.vPos);
                 sample.sColor += pathState.radiance * weight;
+                sample.vColor += pathState.lForDelta * thp;
                 if(kUsedThp)
                 {
-                    sample.vColor = sample.sColor * thp;
+                    sample.vColor += sample.sColor * thp;
                 }
                 else
                 {
                     float invPdf = evalPdfBSDF(sd, wo) > 0.f ? 1.f / evalPdfBSDF(sd, wo) : 0.f;
-                    sample.vColor = evalBSDFCosine(sd, wo) * sample.sColor * invPdf;
+                    sample.vColor += evalBSDFCosine(sd, wo) * sample.sColor * invPdf;
                 }
             }
 

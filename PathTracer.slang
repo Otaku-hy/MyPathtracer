@@ -32,28 +32,31 @@ struct PathSample
 
 struct PathPayLoad
 {
-    uint currentVertexIndex;             //vertexIndex along the path, intialized value is 1
+    uint currentVertexIndex; //vertexIndex along the path, intialized value is 1
 
     bool isTerminated;
     bool isLastVertexSampledLight;
     bool isLightSamplable;
+    bool isCurrentVertexDelta;
 
     float3 origin;
     float3 norm;
     float3 direction;
-    float3 posW;
-
+    
     float pdf;
     float3 radiance;
     float3 thp;
-    
+    float3 lForDelta;
+
     SampleGenerator sg;
 
-    __init(SampleGenerator sampleGenerator)
+    __init(
+    SampleGenerator sampleGenerator)
     {
        sg = sampleGenerator;
 
        isTerminated = false;
+       isCurrentVertexDelta = false;
 
        pdf = 0.f;
        radiance = 0.f;
@@ -62,6 +65,7 @@ struct PathPayLoad
        origin = 0.f;
        norm = 0.f;
        direction = 0.f;
+       lForDelta = 0.f;
 
        currentVertexIndex = 1u;
        isLastVertexSampledLight = false;
@@ -286,6 +290,10 @@ struct PathTracer
             pathState.direction = bsdfSample.wi;
             pathState.origin = rayOrigin;
             pathState.pdf = bsdfSample.pdf;
+
+            if (bsdfSample.isLobe(LobeType::Delta))
+                pathState.isCurrentVertexDelta = true;
+
             return any(pathState.thp > 0.f);
         }
 
@@ -303,14 +311,13 @@ struct PathTracer
         ShadingData sd = LoadShadingData(hit,pathState.direction,lod,isPrimaryHit);
         
         pathState.norm = sd.N;
-        pathState.posW = sd.posW;
 
         bool computeEmissive = isPrimaryHit || (!kUsedNEE || kUsedMis || !pathState.isLastVertexSampledLight);
         if(kUsedReSTIRDI && pathState.currentVertexIndex == 2) computeEmissive = false;
 
+        float misWeight = 1.f;
         if(computeEmissive && any(sd.emissive > 0.f))
-        {
-            float misWeight = 1.f;
+        {    
             if(!isPrimaryHit && isTriangleHit && kUsedMis && pathState.isLastVertexSampledLight)
             {
                 TriangleHit thit = hit.getTriangleHit();
@@ -324,7 +331,9 @@ struct PathTracer
             }
             AddToPathContribution(pathState,sd.emissive * misWeight);
         }
-
+        if (kUsedReSTIRDI && pathState.currentVertexIndex == 2 && pathState.isCurrentVertexDelta)
+            pathState.lForDelta += sd.emissive * misWeight;
+        
         /// terminate path with mis
         if(pathState.currentVertexIndex > kMaxBounces+1)
         {
@@ -381,13 +390,13 @@ struct PathTracer
         pathState.isTerminated = true;
         
         bool computeEnvironment = !kUsedNEE || kUsedMis || !pathState.isLastVertexSampledLight;
+        float3 envRadiance = envMapSampler.eval(pathState.direction);
+        float misWeight = 1.f;
+
         if(kUsedReSTIRDI && pathState.currentVertexIndex == 1) computeEnvironment = false;
 
         if(kUseEnvLight && computeEnvironment)
         {
-            float3 envRadiance  = envMapSampler.eval(pathState.direction);
-            float misWeight = 1.f;
-
             if(kUsedNEE && kUsedMis && pathState.isLastVertexSampledLight)
             {
                 float lightPdf = GetEnvLightProbabilities() * envMapSampler.evalPdf(pathState.direction); 
@@ -396,7 +405,10 @@ struct PathTracer
 
             AddToPathContribution(pathState,envRadiance*misWeight);
         }
-    }
+
+        if (kUsedReSTIRDI && pathState.currentVertexIndex == 1 && pathState.isCurrentVertexDelta)
+            pathState.lForDelta += envRadiance * misWeight;
+}
 };
 
 ParameterBlock<PathTracer> pathtracer;
